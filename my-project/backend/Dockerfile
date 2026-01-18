@@ -10,6 +10,7 @@ WORKDIR /app
 # System deps (optional, pillow usually fine without extra)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./
