@@ -1,7 +1,8 @@
 import os
 import uuid
 import json
-from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks
+import secrets
+from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, Depends, HTTPException, status
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import logging
@@ -18,6 +19,15 @@ from storage_hf import (
     HFStorageClient,
     build_dataset_resolve_url
 )
+from auth import (
+    verify_password,
+    get_password_hash,
+    create_access_token,
+    verify_token,
+    get_current_user
+)
+from auth_storage import AuthStorageClient
+from email_service import EmailService
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -53,6 +63,11 @@ HF_DATASET_REPO = os.getenv("HF_DATASET_REPO", "")  # e.g. username/style-transf
 HF_TOKEN = os.getenv("HF_TOKEN", "")
 storage_client = HFStorageClient(dataset_repo=HF_DATASET_REPO, hf_token=HF_TOKEN)
 
+# Auth storage and email service
+auth_storage = AuthStorageClient(dataset_repo=HF_DATASET_REPO, hf_token=HF_TOKEN)
+email_service = EmailService()
+MASTER_PASSWORD = os.getenv("MASTER_PASSWORD", "")
+
 # Setup CORS
 allowed_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:4200").split(",")
 app.add_middleware(
@@ -80,6 +95,27 @@ class StyleTransferProgress(BaseModel):
     content_loss: Optional[float] = None
     result_url: Optional[str] = None
     error: Optional[str] = None
+
+# Auth models
+class LoginRequest(BaseModel):
+    email: Optional[str] = None
+    password: str
+    master_password: Optional[str] = None
+
+class PermissionRequest(BaseModel):
+    name: str
+    email: str
+    reason: str
+
+class CreateUserRequest(BaseModel):
+    email: str
+    password: str
+
+class ApproveRequestData(BaseModel):
+    password: Optional[str] = None  # Optional custom password, otherwise auto-generated
+
+class RejectRequestData(BaseModel):
+    reason: Optional[str] = None
 
 # Helper function to generate unique file paths
 def get_unique_filename(directory, extension=".jpg"):
@@ -245,6 +281,7 @@ async def create_style_transfer(
     content_weight: float = Form(1.0),
     num_steps: int = Form(300),
     layer_weights: str = Form("{}"),
+    current_user: Dict[str, Any] = Depends(get_current_user),
 ):
     try:
         # Parse layer weights from JSON string
@@ -401,7 +438,10 @@ async def get_gallery_item(item_id: str):
         )
 
 @app.delete("/api/gallery/{item_id}")
-async def delete_gallery_item(item_id: str):
+async def delete_gallery_item(
+    item_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
     try:
         gallery = load_gallery()
         item_to_delete = next((item for item in gallery if item["id"] == item_id), None)
@@ -428,6 +468,242 @@ async def delete_gallery_item(item_id: str):
         return CustomJSONResponse(
             status_code=500,
             content={"error": str(e)}
+        )
+
+# Authentication endpoints
+@app.post("/api/auth/login")
+async def login(login_request: LoginRequest):
+    """
+    Login with email/password or master password.
+    """
+    try:
+        # Check master password
+        if login_request.master_password and MASTER_PASSWORD and login_request.master_password == MASTER_PASSWORD:
+            access_token = create_access_token(data={"email": None, "is_master": True})
+            return {"access_token": access_token, "token_type": "bearer", "is_master": True}
+        
+        # Check user email/password
+        if login_request.email and login_request.password:
+            user = auth_storage.get_user(login_request.email)
+            if user and verify_password(login_request.password, user["password_hash"]):
+                access_token = create_access_token(data={"email": login_request.email, "is_master": False})
+                return {"access_token": access_token, "token_type": "bearer", "is_master": False, "email": login_request.email}
+        
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email/password or master password"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in login: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Login failed"
+        )
+
+@app.post("/api/auth/requests")
+async def submit_permission_request(request: PermissionRequest):
+    """
+    Submit a permission request. Public endpoint.
+    """
+    try:
+        request_id = auth_storage.add_request(
+            name=request.name,
+            email=request.email,
+            reason=request.reason
+        )
+        
+        # Get the request to get timestamp
+        req = auth_storage.get_request(request_id)
+        if req:
+            # Send email notification to admin
+            email_service.send_permission_request_notification(
+                name=request.name,
+                email=request.email,
+                reason=request.reason,
+                timestamp=req.get("timestamp", "")
+            )
+        
+        return {"request_id": request_id, "status": "submitted"}
+    except Exception as e:
+        logger.error(f"Error submitting permission request: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to submit request"
+        )
+
+def verify_master_password(user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+    """Verify that the current user is using master password."""
+    if not user.get("is_master"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Master password required"
+        )
+    return user
+
+@app.get("/api/auth/requests")
+async def list_permission_requests(
+    admin_user: Dict[str, Any] = Depends(verify_master_password)
+):
+    """List all permission requests. Admin only."""
+    try:
+        requests = auth_storage.load_requests()
+        return {"requests": requests}
+    except Exception as e:
+        logger.error(f"Error listing requests: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to list requests"
+        )
+
+@app.post("/api/auth/requests/{request_id}/approve")
+async def approve_request(
+    request_id: str,
+    approve_data: ApproveRequestData,
+    admin_user: Dict[str, Any] = Depends(verify_master_password)
+):
+    """Approve a permission request and create user account. Admin only."""
+    try:
+        req = auth_storage.get_request(request_id)
+        if not req:
+            raise HTTPException(status_code=404, detail="Request not found")
+        
+        if req.get("status") != "pending":
+            raise HTTPException(status_code=400, detail="Request already processed")
+        
+        # Generate password if not provided
+        password = approve_data.password or secrets.token_urlsafe(12)
+        password_hash = get_password_hash(password)
+        
+        # Create user account
+        try:
+            auth_storage.add_user(email=req["email"], password_hash=password_hash)
+        except ValueError as e:
+            # User might already exist
+            logger.warning(f"User creation warning: {str(e)}")
+        
+        # Update request status
+        auth_storage.update_request_status(request_id, "approved")
+        
+        # Send approval email
+        email_service.send_approval_email(
+            user_email=req["email"],
+            user_name=req["name"],
+            password=password
+        )
+        
+        return {"status": "approved", "email": req["email"]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error approving request: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to approve request"
+        )
+
+@app.post("/api/auth/requests/{request_id}/reject")
+async def reject_request(
+    request_id: str,
+    reject_data: RejectRequestData,
+    admin_user: Dict[str, Any] = Depends(verify_master_password)
+):
+    """Reject a permission request. Admin only."""
+    try:
+        req = auth_storage.get_request(request_id)
+        if not req:
+            raise HTTPException(status_code=404, detail="Request not found")
+        
+        if req.get("status") != "pending":
+            raise HTTPException(status_code=400, detail="Request already processed")
+        
+        # Update request status
+        auth_storage.update_request_status(request_id, "rejected", reject_data.reason)
+        
+        # Send rejection email
+        email_service.send_rejection_email(
+            user_email=req["email"],
+            user_name=req["name"],
+            reason=reject_data.reason
+        )
+        
+        return {"status": "rejected"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error rejecting request: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to reject request"
+        )
+
+@app.delete("/api/auth/requests/{request_id}")
+async def delete_request(
+    request_id: str,
+    admin_user: Dict[str, Any] = Depends(verify_master_password)
+):
+    """Delete a permission request without sending email. Admin only."""
+    try:
+        auth_storage.delete_request(request_id)
+        return {"status": "deleted"}
+    except Exception as e:
+        logger.error(f"Error deleting request: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete request"
+        )
+
+@app.post("/api/auth/users")
+async def create_user(
+    user_request: CreateUserRequest,
+    admin_user: Dict[str, Any] = Depends(verify_master_password)
+):
+    """Create a new user. Admin only."""
+    try:
+        password_hash = get_password_hash(user_request.password)
+        auth_storage.add_user(email=user_request.email, password_hash=password_hash)
+        return {"status": "created", "email": user_request.email}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error creating user: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create user"
+        )
+
+@app.get("/api/auth/users")
+async def list_users(
+    admin_user: Dict[str, Any] = Depends(verify_master_password)
+):
+    """List all users. Admin only."""
+    try:
+        users = auth_storage.load_users()
+        # Don't return password hashes
+        user_list = [{"email": user["email"]} for user in users]
+        return {"users": user_list}
+    except Exception as e:
+        logger.error(f"Error listing users: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to list users"
+        )
+
+@app.delete("/api/auth/users/{email}")
+async def delete_user(
+    email: str,
+    admin_user: Dict[str, Any] = Depends(verify_master_password)
+):
+    """Delete a user. Admin only."""
+    try:
+        auth_storage.delete_user(email)
+        return {"status": "deleted", "email": email}
+    except Exception as e:
+        logger.error(f"Error deleting user: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete user"
         )
 
 if __name__ == "__main__":

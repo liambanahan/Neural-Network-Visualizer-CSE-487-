@@ -36,7 +36,12 @@ export class GalleryService {
 
   deleteGalleryItem(id: string): Observable<void> {
     return this.http.delete<void>(`${this.apiUrl}/${id}`).pipe(
-      catchError(this.handleError)
+      catchError((error) => {
+        if (error.status === 401) {
+          return throwError(() => new Error('Authentication required. Please sign in.'));
+        }
+        return this.handleError(error);
+      })
     );
   }
 

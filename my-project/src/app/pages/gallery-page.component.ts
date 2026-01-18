@@ -5,11 +5,13 @@ import { GalleryService } from '../services/gallery.service';
 import { GalleryItem } from '../models/gallery.model';
 import { ImageUrlPipe } from '../pipes/image-url.pipe';
 import { WeightPresetService } from '../services/weight-preset.service';
+import { AuthService } from '../services/auth.service';
+import { AuthModalComponent } from '../components/auth-modal/auth-modal.component';
 
 @Component({
   selector: 'app-gallery-page',
   standalone: true,
-  imports: [CommonModule, FormsModule, ImageUrlPipe],
+  imports: [CommonModule, FormsModule, ImageUrlPipe, AuthModalComponent],
   template: `
     <div class="min-h-screen bg-gradient-to-b from-purple-50 to-purple-100 py-10 px-4">
       <div class="container mx-auto max-w-6xl">
@@ -133,6 +135,12 @@ import { WeightPresetService } from '../services/weight-preset.service';
           </p>
         </div>
       </div>
+      
+      <app-auth-modal
+        *ngIf="showAuthModal"
+        (closeModal)="showAuthModal = false"
+        (loginSuccess)="onLoginSuccess()">
+      </app-auth-modal>
     </div>
   `,
   styles: []
@@ -143,10 +151,12 @@ export class GalleryPageComponent implements OnInit {
   sortOption: string = 'newest';
   activePresetFilter: string = 'all';
   presets: { label: string; styleWeight: number; contentWeight: number }[] = [];
+  showAuthModal = false;
 
   constructor(
     private galleryService: GalleryService,
-    private weightPresetService: WeightPresetService
+    private weightPresetService: WeightPresetService,
+    private authService: AuthService
   ) {}
 
   ngOnInit(): void {
@@ -172,6 +182,12 @@ export class GalleryPageComponent implements OnInit {
   }
 
   deleteItem(id: string): void {
+    // Check authentication first
+    if (!this.authService.isAuthenticated()) {
+      this.showAuthModal = true;
+      return;
+    }
+    
     if (confirm('Are you sure you want to delete this generation?')) {
       this.galleryService.deleteGalleryItem(id).subscribe({
         next: () => {
@@ -180,9 +196,18 @@ export class GalleryPageComponent implements OnInit {
         },
         error: (error) => {
           console.error('Error deleting gallery item:', error);
+          if (error.message?.includes('Authentication required')) {
+            this.showAuthModal = true;
+          } else {
+            alert('Failed to delete item: ' + (error.message || 'Unknown error'));
+          }
         }
       });
     }
+  }
+
+  onLoginSuccess(): void {
+    // User logged in successfully, modal will close automatically
   }
 
   getBalanceLabel(styleWeight: number, contentWeight: number): string {

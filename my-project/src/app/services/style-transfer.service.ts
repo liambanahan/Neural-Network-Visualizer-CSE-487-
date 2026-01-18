@@ -56,7 +56,10 @@ export class StyleTransferService {
       })),
       catchError(error => {
         console.error('Error in style transfer request:', error);
-        return throwError(() => new Error('Failed to start style transfer: ' + error.message));
+        if (error.status === 401) {
+          return throwError(() => new Error('Authentication required. Please sign in.'));
+        }
+        return throwError(() => new Error('Failed to start style transfer: ' + (error.error?.detail || error.message)));
       })
     );
   }

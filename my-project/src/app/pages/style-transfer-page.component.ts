@@ -5,9 +5,11 @@ import { Subscription } from 'rxjs';
 import { ImageUploadComponent } from '../components/image-upload/image-upload.component';
 import { StyleControlsComponent } from '../components/style-controls/style-controls.component';
 import { ResultDisplayComponent } from '../components/result-display/result-display.component';
+import { AuthModalComponent } from '../components/auth-modal/auth-modal.component';
 
 import { ImageFile, StyleTransferParams, StyleTransferJob } from '../models/style-transfer.model';
 import { StyleTransferService } from '../services/style-transfer.service';
+import { AuthService } from '../services/auth.service';
 
 @Component({
   selector: 'app-style-transfer-page',
@@ -16,7 +18,8 @@ import { StyleTransferService } from '../services/style-transfer.service';
     CommonModule,
     ImageUploadComponent,
     StyleControlsComponent,
-    ResultDisplayComponent
+    ResultDisplayComponent,
+    AuthModalComponent
   ],
   template: `
     <div class="min-h-screen bg-gradient-to-b from-purple-50 to-purple-100 py-10 px-4">
@@ -52,6 +55,12 @@ import { StyleTransferService } from '../services/style-transfer.service';
           </app-result-display>
         </div>
       </div>
+      
+      <app-auth-modal
+        *ngIf="showAuthModal"
+        (closeModal)="showAuthModal = false"
+        (loginSuccess)="onLoginSuccess()">
+      </app-auth-modal>
     </div>
   `,
   styles: []
@@ -61,10 +70,14 @@ export class StyleTransferPageComponent implements OnInit, OnDestroy {
   styleImage: ImageFile | null = null;
   currentJob: StyleTransferJob | null = null;
   isProcessing: boolean = false;
+  showAuthModal: boolean = false;
   
   private subscription = new Subscription();
   
-  constructor(private styleTransferService: StyleTransferService) {}
+  constructor(
+    private styleTransferService: StyleTransferService,
+    private authService: AuthService
+  ) {}
   
   ngOnInit(): void {
     // Could check API health here
@@ -88,6 +101,12 @@ export class StyleTransferPageComponent implements OnInit, OnDestroy {
   
   onApplyStyle(params: StyleTransferParams): void {
     if (!this.contentImage?.file || !this.styleImage?.file) {
+      return;
+    }
+    
+    // Check authentication before proceeding
+    if (!this.authService.isAuthenticated()) {
+      this.showAuthModal = true;
       return;
     }
     
@@ -134,5 +153,10 @@ export class StyleTransferPageComponent implements OnInit, OnDestroy {
         };
       }
     });
+  }
+
+  onLoginSuccess(): void {
+    // User logged in successfully, modal will close automatically
+    // They can try again to apply style transfer
   }
 } 
