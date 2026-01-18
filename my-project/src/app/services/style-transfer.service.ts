@@ -3,13 +3,14 @@ import { HttpClient, HttpHeaders } from '@angular/common/http';
 import { Observable, throwError, interval } from 'rxjs';
 import { catchError, switchMap, takeWhile, map } from 'rxjs/operators';
 import { StyleTransferParams, StyleTransferJob, StyleLayerInfo } from '../models/style-transfer.model';
+import { environment } from '../../environments/environment';
 
 @Injectable({
   providedIn: 'root'
 })
 export class StyleTransferService {
-  // API URL configuration - can be moved to an environment variable
-  private apiUrl = 'http://localhost:8000/api';
+  // API URL configuration
+  private apiUrl = environment.apiUrl;
   
   // Default style layers and descriptions
   private styleLayers: StyleLayerInfo[] = [

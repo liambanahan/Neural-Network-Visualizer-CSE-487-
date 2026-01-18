@@ -2,20 +2,22 @@ import os
 import uuid
 import json
 from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-import shutil
 import logging
 from pydantic import BaseModel
-from typing import Dict, Optional, List, Any
+from typing import Dict, Optional, Any
 import asyncio
 from datetime import datetime
 import time
 import math
+import tempfile
 
-# Local imports
 from style_transfer import transfer_style
+from storage_hf import (
+    HFStorageClient,
+    build_dataset_resolve_url
+)
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -46,25 +48,25 @@ class CustomJSONResponse(JSONResponse):
 # Initialize FastAPI
 app = FastAPI(title="Neural Style Transfer API", default_response_class=CustomJSONResponse)
 
-# Setup directory structure
-UPLOAD_DIR = "uploads"
-RESULT_DIR = "results"
-GALLERY_FILE = "gallery.json"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-os.makedirs(RESULT_DIR, exist_ok=True)
+# HF storage configuration
+HF_DATASET_REPO = os.getenv("HF_DATASET_REPO", "")  # e.g. username/style-transfer-data
+HF_TOKEN = os.getenv("HF_TOKEN", "")
+storage_client = HFStorageClient(dataset_repo=HF_DATASET_REPO, hf_token=HF_TOKEN)
 
 # Setup CORS
+allowed_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:4200").split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:4200"],
+    allow_origins=[origin.strip() for origin in allowed_origins if origin.strip()],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Mount directories for static file access
-app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
-app.mount("/results", StaticFiles(directory=RESULT_DIR), name="results")
+"""
+With Hugging Face storage, images are served via absolute URLs from the
+dataset CDN, so we no longer mount local static directories.
+"""
 
 # Keep track of running jobs using asyncio.Queue for thread-safe updates
 job_queues = {}
@@ -83,40 +85,25 @@ class StyleTransferProgress(BaseModel):
 def get_unique_filename(directory, extension=".jpg"):
     return os.path.join(directory, f"{uuid.uuid4()}{extension}")
 
-# Load gallery data
 def load_gallery():
-    if os.path.exists(GALLERY_FILE):
-        try:
-            with open(GALLERY_FILE, 'r') as f:
-                data = json.load(f)
-                # Convert string representations back to float values
-                for item in data:
-                    if isinstance(item.get('bestLoss'), str):
-                        if item.get('bestLoss') == "Infinity":
-                            item['bestLoss'] = float('inf')
-                        elif item.get('bestLoss') == "-Infinity":
-                            item['bestLoss'] = float('-inf')
-                        elif item.get('bestLoss') == "NaN":
-                            item['bestLoss'] = float('nan')
-                return data
-        except Exception as e:
-            logger.error(f"Error loading gallery data: {str(e)}")
-            return []
-    return []
+    try:
+        return storage_client.load_gallery()
+    except Exception as e:
+        logger.error(f"Error loading gallery data from HF: {str(e)}")
+        return []
 
 def save_gallery(gallery_data):
     try:
-        with open(GALLERY_FILE, 'w') as f:
-            json.dump(gallery_data, f, indent=2, cls=CustomJSONEncoder)
+        storage_client.save_gallery(gallery_data)
     except Exception as e:
-        logger.error(f"Error saving gallery data: {str(e)}")
+        logger.error(f"Error saving gallery data to HF: {str(e)}")
 
 # Background task for style transfer
 async def run_style_transfer_task(
     job_id: str,
-    content_path: str,
-    style_path: str,
-    output_path: str,
+    content_local_path: str,
+    style_local_path: str,
+    output_local_path: str,
     style_weight: float,
     content_weight: float,
     num_steps: int,
@@ -166,9 +153,9 @@ async def run_style_transfer_task(
         
         # Run the style transfer
         result_path, model_best_loss = transfer_style(
-            content_path=content_path,
-            style_path=style_path,
-            output_path=output_path,
+            content_path=content_local_path,
+            style_path=style_local_path,
+            output_path=output_local_path,
             style_weight=style_weight,
             content_weight=content_weight,
             num_steps=num_steps,
@@ -182,14 +169,35 @@ async def run_style_transfer_task(
         if math.isinf(best_loss):
             best_loss = model_best_loss if not math.isinf(model_best_loss) else style_loss + content_loss
             
-        # Save to gallery, replacing infinity with a very large number for JSON
+        # Upload artifacts to Hugging Face dataset and build absolute URLs
+        date_prefix = datetime.utcnow().strftime("%Y/%m/%d")
+        base_prefix = f"runs/{date_prefix}/{job_id}"
+
+        content_ds_path = storage_client.upload_file(
+            local_path=content_local_path,
+            dst_path=f"{base_prefix}/content.jpg"
+        )
+        style_ds_path = storage_client.upload_file(
+            local_path=style_local_path,
+            dst_path=f"{base_prefix}/style.jpg"
+        )
+        result_ds_path = storage_client.upload_file(
+            local_path=output_local_path,
+            dst_path=f"{base_prefix}/result.jpg"
+        )
+
+        content_url = build_dataset_resolve_url(storage_client.dataset_repo, content_ds_path)
+        style_url = build_dataset_resolve_url(storage_client.dataset_repo, style_ds_path)
+        result_url = build_dataset_resolve_url(storage_client.dataset_repo, result_ds_path)
+
+        # Save to gallery
         gallery_item = {
             "id": job_id,
-            "timestamp": datetime.now().isoformat(),
-            "contentImageUrl": f"/uploads/{os.path.basename(content_path)}",
-            "styleImageUrl": f"/uploads/{os.path.basename(style_path)}",
-            "resultImageUrl": f"/results/{os.path.basename(output_path)}",
-            "bestLoss": style_loss + content_loss,  # Always use the actual sum for best loss
+            "timestamp": datetime.utcnow().isoformat(),
+            "contentImageUrl": content_url,
+            "styleImageUrl": style_url,
+            "resultImageUrl": result_url,
+            "bestLoss": style_loss + content_loss,
             "styleLoss": style_loss,
             "contentLoss": content_loss,
             "processingTime": processing_time,
@@ -211,7 +219,7 @@ async def run_style_transfer_task(
             "progress": 100,
             "style_loss": style_loss,
             "content_loss": content_loss,
-            "result_url": f"/results/{os.path.basename(output_path)}"
+            "result_url": result_url
         })
         
     except Exception as e:
@@ -242,15 +250,15 @@ async def create_style_transfer(
         # Parse layer weights from JSON string
         layer_weights_dict = json.loads(layer_weights)
         
-        # Generate unique file paths
-        content_path = get_unique_filename(UPLOAD_DIR)
-        style_path = get_unique_filename(UPLOAD_DIR)
-        output_path = get_unique_filename(RESULT_DIR)
-        
-        # Save uploaded files
+        # Save uploaded files temporarily to local disk for processing
+        temp_dir = tempfile.gettempdir()
+        content_path = get_unique_filename(temp_dir)
+        style_path = get_unique_filename(temp_dir)
+        output_path = get_unique_filename(temp_dir)
+
         with open(content_path, "wb") as content_file:
             content_file.write(await content_image.read())
-        
+
         with open(style_path, "wb") as style_file:
             style_file.write(await style_image.read())
         
@@ -404,27 +412,15 @@ async def delete_gallery_item(item_id: str):
                 content={"error": "Item not found"}
             )
             
-        # Get the file paths to delete
-        content_path = item_to_delete.get("contentImageUrl", "").replace("/uploads/", "")
-        style_path = item_to_delete.get("styleImageUrl", "").replace("/uploads/", "")
-        result_path = item_to_delete.get("resultImageUrl", "").replace("/results/", "")
-        
-        # Remove from gallery
+        # Remove from gallery first
         gallery = [item for item in gallery if item["id"] != item_id]
         save_gallery(gallery)
-        
-        # Clean up files
+
+        # Attempt to delete artifacts from dataset
         try:
-            if content_path and os.path.exists(os.path.join(UPLOAD_DIR, content_path)):
-                os.remove(os.path.join(UPLOAD_DIR, content_path))
-                
-            if style_path and os.path.exists(os.path.join(UPLOAD_DIR, style_path)):
-                os.remove(os.path.join(UPLOAD_DIR, style_path))
-                
-            if result_path and os.path.exists(os.path.join(RESULT_DIR, result_path)):
-                os.remove(os.path.join(RESULT_DIR, result_path))
+            storage_client.delete_run_artifacts(item_to_delete)
         except Exception as e:
-            logger.error(f"Error cleaning up files for {item_id}: {str(e)}")
+            logger.error(f"Error deleting dataset artifacts for {item_id}: {str(e)}")
         
         return {"status": "success"}
     except Exception as e:
