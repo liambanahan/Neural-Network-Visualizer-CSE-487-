@@ -48,4 +48,8 @@ Thumbs.db
 my-project/backend/__pycache__/
 my-project/backend/results/
 my-project/backend/uploads/
+my-project/backend/gallery.json
+my-project/backend/.env
 my-project/.angular/
+
+.venv/

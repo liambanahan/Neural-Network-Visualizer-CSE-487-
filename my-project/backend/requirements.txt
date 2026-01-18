@@ -9,3 +9,4 @@ aiofiles==23.2.1
 matplotlib>=3.7.2
 requests==2.31.0
 python-dotenv==1.0.0 
+huggingface_hub>=0.26.0
