@@ -22,9 +22,5 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 
 COPY . .
 
-# Make startup script executable
-RUN chmod +x start.sh
-
-# Use the startup script which properly handles PORT variable
-CMD ["./start.sh"]
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-7860}"]
 
