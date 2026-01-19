@@ -7,10 +7,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# Install git first (needed for Hugging Face Spaces build process)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
 # System deps (optional, pillow usually fine without extra)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
-    git \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./
