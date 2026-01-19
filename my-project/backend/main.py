@@ -58,6 +58,14 @@ class CustomJSONResponse(JSONResponse):
 # Initialize FastAPI
 app = FastAPI(title="Neural Style Transfer API", default_response_class=CustomJSONResponse)
 
+# Add request logging middleware
+@app.middleware("http")
+async def log_requests(request, call_next):
+    logger.info(f"Incoming request: {request.method} {request.url.path} from {request.client.host if request.client else 'unknown'}")
+    response = await call_next(request)
+    logger.info(f"Response: {request.method} {request.url.path} -> {response.status_code}")
+    return response
+
 # HF storage configuration
 HF_DATASET_REPO = os.getenv("HF_DATASET_REPO", "")  # e.g. username/style-transfer-data
 HF_TOKEN = os.getenv("HF_TOKEN", "")
