@@ -53,3 +53,9 @@ my-project/backend/.env
 my-project/.angular/
 
 .venv/
+
+# SSH keys (should not be committed)
+hf
+hf.pub
+*.pem
+*.key
