@@ -6,6 +6,8 @@ on:
       - main
     paths:
       - 'my-project/backend/**'
+      - '.github/workflows/deploy-backend.yml'
+  workflow_dispatch:
 
 jobs:
   deploy:
