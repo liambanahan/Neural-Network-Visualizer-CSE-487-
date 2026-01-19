@@ -70,9 +70,11 @@ MASTER_PASSWORD = os.getenv("MASTER_PASSWORD", "")
 
 # Setup CORS
 allowed_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:4200").split(",")
+allowed_origins_clean = [origin.strip() for origin in allowed_origins if origin.strip()]
+logger.info(f"CORS allowed origins: {allowed_origins_clean}")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[origin.strip() for origin in allowed_origins if origin.strip()],
+    allow_origins=allowed_origins_clean,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -476,6 +478,7 @@ async def login(login_request: LoginRequest):
     """
     Login with email/password or master password.
     """
+    logger.info(f"Login attempt - email: {login_request.email}, has_master_password: {bool(login_request.master_password)}")
     try:
         # Check master password first (doesn't require email or password)
         if login_request.master_password and MASTER_PASSWORD and login_request.master_password == MASTER_PASSWORD:
