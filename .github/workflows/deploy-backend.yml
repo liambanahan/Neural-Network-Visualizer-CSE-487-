@@ -28,6 +28,12 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           git remote add hf https://${{ secrets.HF_USERNAME }}:${{ secrets.HF_TOKEN }}@huggingface.co/spaces/${{ secrets.HF_USERNAME }}/${{ secrets.HF_SPACE_NAME }}
+          # Split subtree
           git subtree split --prefix=my-project/backend -b hf-backend
+          # Remove binary files from the split branch history
+          git checkout hf-backend
+          git filter-branch --force --index-filter 'git rm -rf --cached --ignore-unmatch uploads results gallery.json 2>/dev/null || true' --prune-empty -- hf-backend
+          git checkout main
+          # Force push the cleaned branch
           git push hf hf-backend:main --force
           git branch -D hf-backend
