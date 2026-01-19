@@ -1,5 +1,6 @@
 import os
-import jwt
+from jose import jwt
+from jose.exceptions import ExpiredSignatureError, JWTError
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 from fastapi import HTTPException, status, Depends
@@ -48,10 +49,10 @@ def verify_token(token: str) -> Optional[Dict[str, Any]]:
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         return payload
-    except jwt.ExpiredSignatureError:
+    except ExpiredSignatureError:
         logger.warning("Token has expired")
         return None
-    except jwt.InvalidTokenError:
+    except JWTError:
         logger.warning("Invalid token")
         return None
 
