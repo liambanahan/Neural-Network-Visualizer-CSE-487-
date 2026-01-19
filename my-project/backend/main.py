@@ -99,7 +99,7 @@ class StyleTransferProgress(BaseModel):
 # Auth models
 class LoginRequest(BaseModel):
     email: Optional[str] = None
-    password: str
+    password: Optional[str] = None
     master_password: Optional[str] = None
 
 class PermissionRequest(BaseModel):
@@ -477,12 +477,12 @@ async def login(login_request: LoginRequest):
     Login with email/password or master password.
     """
     try:
-        # Check master password
+        # Check master password first (doesn't require email or password)
         if login_request.master_password and MASTER_PASSWORD and login_request.master_password == MASTER_PASSWORD:
             access_token = create_access_token(data={"email": None, "is_master": True})
             return {"access_token": access_token, "token_type": "bearer", "is_master": True}
         
-        # Check user email/password
+        # Check user email/password (requires both email and password)
         if login_request.email and login_request.password:
             user = auth_storage.get_user(login_request.email)
             if user and verify_password(login_request.password, user["password_hash"]):
